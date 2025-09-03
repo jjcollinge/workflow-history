@@ -1,0 +1,11 @@
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: actorstate
+  namespace: default
+spec:
+  type: state.in-memory
+  version: v1
+  metadata:
+    - name: actorStateStore
+      value: true

@@ -1,0 +1,11 @@
+version: 1
+common:
+  resourcesPath: ./components
+apps:
+  - appID: workflow-history
+    appDirPath: .
+    command: ["go", "run", "."]
+    appProtocol: grpc
+    logLevel: debug
+    daprHTTPPort: 3500
+    daprGRPCPort: 50001
