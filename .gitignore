@@ -1,3 +1,4 @@
 .dapr
 workflow-history
+workflow-history.json
 workflow-hashes.json

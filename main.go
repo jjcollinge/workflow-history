@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,6 +33,7 @@ const (
 	httpTimeout         = 5 * time.Second
 	maxHistoryEntries   = 100000
 	historyFileName     = "workflow-hashes.json"
+	fullHistoryFileName = "workflow-history.json"
 )
 
 // Result represents the final output JSON structure for a single workflow
@@ -88,9 +88,9 @@ func main() {
 
 func NewConfig() Config {
 	return Config{
-		AppID:     getenvWithDefault([]string{"APP_ID", "DAPR_APP_ID"}, defaultAppID),
-		Namespace: getenvWithDefault([]string{"DAPR_NAMESPACE"}, defaultNamespace),
-		HTTPPort:  getenvWithDefault([]string{"DAPR_HTTP_PORT"}, defaultDaprHTTPPort),
+		AppID:     getEnvWithDefault([]string{"APP_ID", "DAPR_APP_ID"}, defaultAppID),
+		Namespace: getEnvWithDefault([]string{"DAPR_NAMESPACE"}, defaultNamespace),
+		HTTPPort:  getEnvWithDefault([]string{"DAPR_HTTP_PORT"}, defaultDaprHTTPPort),
 	}
 }
 
@@ -142,10 +142,8 @@ func runWorkflow(ctx context.Context, config Config) error {
 		return fmt.Errorf("failed to marshal results: %w", err)
 	}
 
-	// Print the full history to stdout first
 	fmt.Println(string(output))
 
-	// Handle file operations for history validation
 	if err := handleHistoryFile(output); err != nil {
 		return fmt.Errorf("failed to handle history file: %w", err)
 	}
@@ -248,8 +246,7 @@ func outputWorkflowHistory(ctx context.Context, config Config, example workflows
 }
 
 func createWorkflowResult(name, description, instanceID string, events []*protos.HistoryEvent) (WorkflowResult, error) {
-	// Create a deterministic signature by grouping and sorting events logically
-	signature := createDeterministicSignature(events)
+	signature := createSignature(events)
 
 	h := sha256.Sum256([]byte(signature))
 	hashHex := hex.EncodeToString(h[:])
@@ -269,59 +266,15 @@ func createWorkflowResult(name, description, instanceID string, events []*protos
 	}, nil
 }
 
-func createDeterministicSignature(events []*protos.HistoryEvent) string {
-	// Group events by type and sort them for deterministic ordering
-	var execStart, taskSched, taskComp, eventRaised, timerEvents, orchEvents, execComp []string
+func createSignature(events []*protos.HistoryEvent) string {
+	var eventSignatures []string
 
 	for _, event := range events {
-		switch eventType := event.GetEventType().(type) {
-		case *protos.HistoryEvent_ExecutionStarted:
-			execStart = append(execStart, fmt.Sprintf("ExecutionStarted:%s", eventType.ExecutionStarted.GetName()))
-		case *protos.HistoryEvent_TaskScheduled:
-			taskSched = append(taskSched, fmt.Sprintf("TaskScheduled:%s", eventType.TaskScheduled.GetName()))
-		case *protos.HistoryEvent_TaskCompleted:
-			taskComp = append(taskComp, fmt.Sprintf("TaskCompleted:%d", eventType.TaskCompleted.GetTaskScheduledId()))
-		case *protos.HistoryEvent_TaskFailed:
-			taskComp = append(taskComp, fmt.Sprintf("TaskFailed:%d", eventType.TaskFailed.GetTaskScheduledId()))
-		case *protos.HistoryEvent_EventRaised:
-			eventRaised = append(eventRaised, fmt.Sprintf("EventRaised:%s", eventType.EventRaised.GetName()))
-		case *protos.HistoryEvent_TimerCreated:
-			timerEvents = append(timerEvents, "TimerCreated")
-		case *protos.HistoryEvent_TimerFired:
-			timerEvents = append(timerEvents, fmt.Sprintf("TimerFired:%d", eventType.TimerFired.GetTimerId()))
-		case *protos.HistoryEvent_OrchestratorStarted:
-			orchEvents = append(orchEvents, "OrchestratorStarted")
-		case *protos.HistoryEvent_OrchestratorCompleted:
-			orchEvents = append(orchEvents, "OrchestratorCompleted")
-		case *protos.HistoryEvent_ExecutionCompleted:
-			execComp = append(execComp, fmt.Sprintf("ExecutionCompleted:%s", eventType.ExecutionCompleted.GetOrchestrationStatus().String()))
-		case *protos.HistoryEvent_SubOrchestrationInstanceCreated:
-			taskSched = append(taskSched, fmt.Sprintf("SubOrchestrationInstanceCreated:%s", eventType.SubOrchestrationInstanceCreated.GetName()))
-		case *protos.HistoryEvent_SubOrchestrationInstanceCompleted:
-			taskComp = append(taskComp, fmt.Sprintf("SubOrchestrationInstanceCompleted:%d", eventType.SubOrchestrationInstanceCompleted.GetTaskScheduledId()))
-		}
+		signature := getEventSignature(event)
+		eventSignatures = append(eventSignatures, signature)
 	}
 
-	// Sort each group internally for consistency
-	sort.Strings(execStart)
-	sort.Strings(taskSched)
-	sort.Strings(taskComp)
-	sort.Strings(eventRaised)
-	sort.Strings(timerEvents)
-	sort.Strings(orchEvents)
-	sort.Strings(execComp)
-
-	// Combine in logical execution order
-	var allEvents []string
-	allEvents = append(allEvents, execStart...)
-	allEvents = append(allEvents, taskSched...)
-	allEvents = append(allEvents, taskComp...)
-	allEvents = append(allEvents, eventRaised...)
-	allEvents = append(allEvents, timerEvents...)
-	allEvents = append(allEvents, orchEvents...)
-	allEvents = append(allEvents, execComp...)
-
-	return strings.Join(allEvents, ",")
+	return strings.Join(eventSignatures, ",")
 }
 
 func getEventSignature(event *protos.HistoryEvent) string {
@@ -360,33 +313,6 @@ func getEventSignature(event *protos.HistoryEvent) string {
 	case *protos.HistoryEvent_SubOrchestrationInstanceCompleted:
 		// Include task scheduled ID for deterministic correlation
 		return fmt.Sprintf("SubOrchestrationInstanceCompleted:%d", eventType.SubOrchestrationInstanceCompleted.GetTaskScheduledId())
-	default:
-		return "Other"
-	}
-}
-
-func getEventTypeName(event *protos.HistoryEvent) string {
-	switch event.GetEventType().(type) {
-	case *protos.HistoryEvent_ExecutionStarted:
-		return "ExecutionStarted"
-	case *protos.HistoryEvent_TaskScheduled:
-		return "TaskScheduled"
-	case *protos.HistoryEvent_TaskCompleted:
-		return "TaskCompleted"
-	case *protos.HistoryEvent_TaskFailed:
-		return "TaskFailed"
-	case *protos.HistoryEvent_EventRaised:
-		return "EventRaised"
-	case *protos.HistoryEvent_TimerCreated:
-		return "TimerCreated"
-	case *protos.HistoryEvent_TimerFired:
-		return "TimerFired"
-	case *protos.HistoryEvent_OrchestratorStarted:
-		return "OrchestratorStarted"
-	case *protos.HistoryEvent_OrchestratorCompleted:
-		return "OrchestratorCompleted"
-	case *protos.HistoryEvent_ExecutionCompleted:
-		return "ExecutionCompleted"
 	default:
 		return "Other"
 	}
@@ -492,13 +418,17 @@ func unquoteJSON(data []byte) (string, error) {
 }
 
 func handleHistoryFile(currentHistory []byte) error {
-	// Parse current history to extract hashes
+	log.Printf("Writing full workflow history to: %s", fullHistoryFileName)
+	if err := os.WriteFile(fullHistoryFileName, currentHistory, 0644); err != nil {
+		return fmt.Errorf("failed to write full history file: %w", err)
+	}
+	log.Printf("Full history file written successfully")
+
 	var current Results
 	if err := json.Unmarshal(currentHistory, &current); err != nil {
 		return fmt.Errorf("failed to parse current history: %w", err)
 	}
 
-	// Create hash-only version for disk storage
 	hashOnly := HashOnlyResults{
 		Examples: make([]WorkflowHash, len(current.Examples)),
 	}
@@ -509,9 +439,7 @@ func handleHistoryFile(currentHistory []byte) error {
 		}
 	}
 
-	// Check if history file already exists
 	if _, err := os.Stat(historyFileName); os.IsNotExist(err) {
-		// File doesn't exist, create it with just hashes
 		log.Printf("Creating new history file: %s", historyFileName)
 		hashData, err := json.MarshalIndent(hashOnly, "", "  ")
 		if err != nil {
@@ -526,14 +454,12 @@ func handleHistoryFile(currentHistory []byte) error {
 		return fmt.Errorf("failed to check if history file exists: %w", err)
 	}
 
-	// File exists, read and compare
 	log.Printf("Reading existing history file: %s", historyFileName)
 	existingData, err := os.ReadFile(historyFileName)
 	if err != nil {
 		return fmt.Errorf("failed to read existing history file: %w", err)
 	}
 
-	// Compare the hashes
 	if err := compareHashes(existingData, hashOnly); err != nil {
 		return fmt.Errorf("history validation failed: %w", err)
 	}
@@ -545,18 +471,15 @@ func handleHistoryFile(currentHistory []byte) error {
 func compareHashes(existingData []byte, currentHashes HashOnlyResults) error {
 	var existing HashOnlyResults
 
-	// Parse existing hash data
 	if err := json.Unmarshal(existingData, &existing); err != nil {
 		return fmt.Errorf("failed to parse existing hash data: %w", err)
 	}
 
-	// Compare number of examples
 	if len(existing.Examples) != len(currentHashes.Examples) {
 		return fmt.Errorf("number of workflow examples differs: existing=%d, current=%d",
 			len(existing.Examples), len(currentHashes.Examples))
 	}
 
-	// Compare each example by hash (which represents the workflow execution pattern)
 	for i, existingExample := range existing.Examples {
 		currentExample := currentHashes.Examples[i]
 
@@ -574,7 +497,7 @@ func compareHashes(existingData []byte, currentHashes HashOnlyResults) error {
 	return nil
 }
 
-func getenvWithDefault(keys []string, defaultValue string) string {
+func getEnvWithDefault(keys []string, defaultValue string) string {
 	for _, key := range keys {
 		if value := os.Getenv(key); value != "" {
 			return value
