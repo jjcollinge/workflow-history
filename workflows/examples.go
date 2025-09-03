@@ -64,23 +64,24 @@ func SimpleWorkflow(ctx *workflow.WorkflowContext) (any, error) {
 		return nil, err
 	}
 
-	var out string
-	if err := ctx.CallActivity(SimpleActivity, workflow.ActivityInput(n)).Await(&out); err != nil {
-		return nil, err
-	}
-
-	// Wait for external event
+	// Wait for external event first to guarantee the event is recorded
+	// before any activity scheduling.
 	var evt string
 	if err := ctx.WaitForExternalEvent("go", 30*time.Second).Await(&evt); err != nil {
 		return nil, err
 	}
 
-	// Call activity again with incremented input
+	var out string
+	// Call activities in a strict sequence
+	if err := ctx.CallActivity(SimpleActivity, workflow.ActivityInput(n)).Await(&out); err != nil {
+		return nil, err
+	}
+
 	if err := ctx.CallActivity(SimpleActivity, workflow.ActivityInput(n+1)).Await(&out); err != nil {
 		return nil, err
 	}
 
-	// Add an additional activity call to change the pattern
+	// Additional activity to keep same output pattern
 	if err := ctx.CallActivity(SimpleActivity, workflow.ActivityInput(n+2)).Await(&out); err != nil {
 		return nil, err
 	}
